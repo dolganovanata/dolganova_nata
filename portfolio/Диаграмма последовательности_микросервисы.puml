@@ -1,0 +1,81 @@
+@startuml
+autonumber
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor "Клиент" as Client
+participant "API Gateway" as Gateway
+participant "Application Service" as AppService
+database "Application DB" as AppDB
+queue "Kafka" as Kafka
+participant "Notification Service" as Notif
+participant "Scoring Service" as Scoring
+database "Scoring DB" as ScoreDB
+participant "BKI Service" as BKI
+participant "БКИ (внешнее)" as ExtBKI
+
+== 1. Создание заявки ==
+Client -> Gateway : POST /applications
+activate Gateway
+Gateway -> AppService : Создать заявку
+activate AppService
+
+AppService -> AppDB : INSERT applications (PENDING)
+activate AppDB
+AppDB --> AppService : OK
+deactivate AppDB
+
+AppService -> Kafka : Publish: application.created
+AppService --> Gateway : 201 Created
+deactivate AppService
+Gateway --> Client : 201 Created (Заявка создана)
+deactivate Gateway
+
+== 2. Уведомление о создании ==
+Kafka ->> Notif : Consume: application.created
+activate Notif
+Notif --> Client : Email "Заявка создана"
+deactivate Notif
+
+== 3. Асинхронный скоринг ==
+Kafka ->> Scoring : Consume: application.created
+activate Scoring
+
+Scoring -> BKI : Запрос в БКИ
+activate BKI
+BKI -> ExtBKI : POST /check
+activate ExtBKI
+
+alt Успешный ответ
+    ExtBKI --> BKI : 200 OK (Данные)
+    BKI -> ScoreDB : INSERT scoring_result (OK)
+    BKI --> Scoring : Результат
+    Scoring -> Kafka : Publish: scoring.completed
+else Ошибка / Таймаут
+    ExtBKI --> BKI : Timeout / 500
+    BKI -> ScoreDB : INSERT scoring_result (ERROR)
+    BKI --> Scoring : Ошибка
+    Scoring -> Kafka : Publish: scoring.failed
+end
+deactivate ExtBKI
+deactivate BKI
+deactivate Scoring
+
+== 4. Обновление статуса ==
+Kafka ->> AppService : Consume: scoring.completed / failed
+activate AppService
+AppService -> AppDB : UPDATE applications (APPROVED / DENIED)
+activate AppDB
+AppDB --> AppService : OK
+deactivate AppDB
+
+AppService -> Kafka : Publish: status.changed
+deactivate AppService
+
+== 5. Уведомление о решении ==
+Kafka ->> Notif : Consume: status.changed
+activate Notif
+Notif --> Client : Email "Решение по заявке"
+deactivate Notif
+
+@enduml

@@ -1,0 +1,78 @@
+@startuml
+autonumber
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor "Клиент" as Client
+participant "API Gateway\n(Backend)" as API
+participant "Loan Service\n(Сервис заявок)" as LoanService
+participant "Scoring Service\n(Сервис скоринга)" as Scoring
+participant "BKI Client\n(Интеграционный модуль)" as BKI
+participant "Внешнее БКИ" as ExtBKI
+database "PostgreSQL" as DB
+
+== 1. Синхронный процесс подачи и скоринга ==
+Client -> API : POST /api/loan-applications
+activate API
+API -> LoanService : createApplication(payload)
+activate LoanService
+
+LoanService -> DB : INSERT INTO applications\n(status = 'CONSIDERATION')
+activate DB
+DB --> LoanService : application_id
+deactivate DB
+
+== 2. Вызов БКИ (в рамках того же HTTP-запроса) ==
+LoanService -> Scoring : calculateScore
+activate Scoring
+
+Scoring -> BKI : checkCreditHistory
+activate BKI
+
+BKI -> ExtBKI : POST /v1/credit-history/check
+activate ExtBKI
+note right of ExtBKI : Таймаут ожидания ответа: 10 сек.
+ExtBKI --> BKI : 200 OK (JSON: score, isStopList)
+deactivate ExtBKI
+
+BKI --> Scoring : CreditHistoryResponse
+deactivate BKI
+
+Scoring -> DB : INSERT INTO scoring_result\n(score, bki_response_data)
+activate DB
+DB --> Scoring : OK
+deactivate DB
+
+== 3. Определение статуса заявки ==
+alt Стоп-лист или низкий балл
+    Scoring --> LoanService : result = DENIED
+    LoanService -> DB : UPDATE applications\nSET status = 'DENIED'
+    activate DB
+    DB --> LoanService : OK
+    deactivate DB
+    LoanService --> API : 200 OK (status: DENIED)
+    API --> Client : 200 OK (Кредит отклонен)
+
+else Высокий балл
+    Scoring --> LoanService : result = APPROVED
+    LoanService -> DB : UPDATE applications\nSET status = 'APPROVED'
+    activate DB
+    DB --> LoanService : OK
+    deactivate DB
+    LoanService --> API : 200 OK (status: APPROVED)
+    API --> Client : 200 OK (Кредит одобрен)
+
+else Пограничный балл или крупная сумма
+    Scoring --> LoanService : result = MANUAL_REVIEW
+    LoanService -> DB : UPDATE applications\nSET status = 'MANUAL_REVIEW'
+    activate DB
+    DB --> LoanService : OK
+    deactivate DB
+    LoanService --> API : 200 OK (status: MANUAL_REVIEW)
+    API --> Client : 200 OK (Заявка на ручной проверке)
+end
+deactivate Scoring
+deactivate LoanService
+deactivate API
+
+@enduml
