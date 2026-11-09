@@ -1,0 +1,181 @@
+openapi: 3.0.3
+info:
+  title: BKI Integration API (Интеграция с Бюро кредитных историй)
+  version: 1.0.0
+  description: |
+    Контракт для синхронного запроса кредитной истории и стоп-листов клиента.
+    **Безопасность:** Передача данных осуществляется строго по протоколу HTTPS. 
+    Запросы подписываются УКЭП (усиленной квалифицированной электронной подписью).
+  contact:
+    name: API Support Team
+    email: api-team@bank.ru
+
+servers:
+  - url: https://api.bki-provider.ru/v1
+    description: Production сервер БКИ
+  - url: https://api.bki-test.ru/v1
+    description: Test сервер БКИ
+
+tags:
+  - name: CreditHistory
+    description: Операции с кредитной историей
+
+paths:
+  /credit-history/check:
+    post:
+      tags:
+        - CreditHistory
+      summary: Запрос кредитной истории и проверка по стоп-листам
+      operationId: checkCreditHistory
+      description: Возвращает скоринговый балл, информацию о просрочках и признак нахождения в стоп-листах.
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: true
+          description: Уникальный идентификатор запроса для идемпотентности и трассировки.
+          schema:
+            type: string
+            format: uuid
+        - name: X-Signature
+          in: header
+          required: true
+          description: Электронная подпись, сформированная закрытым ключом банка.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreditHistoryRequest'
+            example:
+              client:
+                lastName: "Иванов"
+                firstName: "Иван"
+                middleName: "Иванович"
+                birthDate: "1985-05-20"
+                passportSeries: "4509"
+                passportNumber: "123456"
+                inn: "770123456789"
+              requestedAmount: 1500000.00
+      responses:
+        '200':
+          description: Успешный ответ от БКИ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreditHistoryResponse'
+        '400':
+          description: Ошибка валидации входных данных (неверный формат паспорта и т.д.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Ошибка авторизации (неверная подпись ЭП или истек срок действия сертификата)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Сервис БКИ временно недоступен (таймаут)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    CreditHistoryRequest:
+      type: object
+      required:
+        - client
+        - requestedAmount
+      properties:
+        client:
+          $ref: '#/components/schemas/ClientData'
+        requestedAmount:
+          type: number
+          format: double
+          description: Запрашиваемая сумма кредита (в рублях)
+          example: 1500000.00
+
+    ClientData:
+      type: object
+      required:
+        - lastName
+        - firstName
+        - birthDate
+        - passportSeries
+        - passportNumber
+        - inn
+      properties:
+        lastName:
+          type: string
+          example: "Иванов"
+        firstName:
+          type: string
+          example: "Иван"
+        middleName:
+          type: string
+          example: "Иванович"
+        birthDate:
+          type: string
+          format: date
+          example: "1985-05-20"
+        passportSeries:
+          type: string
+          pattern: '^\d{4}$'
+          example: "4509"
+        passportNumber:
+          type: string
+          pattern: '^\d{6}$'
+          example: "123456"
+        inn:
+          type: string
+          pattern: '^\d{12}$'
+          description: ИНН (12 цифр для физлиц/ИП)
+          example: "770123456789"
+
+    CreditHistoryResponse:
+      type: object
+      required:
+        - requestId
+        - score
+        - isStopList
+        - checkedAt
+      properties:
+        requestId:
+          type: string
+          format: uuid
+          description: ID запроса, совпадает с X-Request-ID
+        score:
+          type: integer
+          description: Скоринговый балл от БКИ 
+          example: 720
+        isStopList:
+          type: boolean
+          description: Найден ли клиент в стоп-листах (мошенничество, терроризм)
+          example: false
+        hasOverdue:
+          type: boolean
+          description: Есть ли текущие просрочки
+          example: false
+        rawData:
+          type: object
+          description: Сырые данные от БКИ (сохраняются в БД для аудита)
+          additionalProperties: true
+        checkedAt:
+          type: string
+          format: date-time
+          example: "2026-05-20T14:30:00Z"
+
+    ErrorResponse:
+      type: object
+      properties:
+        errorCode:
+          type: string
+          example: "INVALID_PASSPORT"
+        message:
+          type: string
+          example: "Неверный формат паспортных данных"
